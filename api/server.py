@@ -110,10 +110,12 @@ async def transcribe_audio(
 ):
     client = OpenAI()
     audio_bytes = await audio.read()
+    print(f"[transcribe] received {len(audio_bytes)} bytes, content_type={audio.content_type}, filename={audio.filename}")
     transcript = client.audio.transcriptions.create(
         model="gpt-4o-mini-transcribe",
         file=(audio.filename or "recording.webm", audio_bytes, audio.content_type or "audio/webm"),
     )
+    print(f"[transcribe] result text={transcript.text!r}")
     return {"text": transcript.text}
 
 

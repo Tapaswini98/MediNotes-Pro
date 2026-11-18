@@ -25,13 +25,56 @@ function ConsultationForm() {
     // Voice recording state
     const [isRecording, setIsRecording] = useState(false);
     const [transcribing, setTranscribing] = useState(false);
+    const [recordingSeconds, setRecordingSeconds] = useState(0);
+    const [audioLevels, setAudioLevels] = useState<number[]>(new Array(24).fill(0.08));
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const analyserRef = useRef<AnalyserNode | null>(null);
+    const animationFrameRef = useRef<number | null>(null);
+    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    function watchAudioLevel() {
+        const analyser = analyserRef.current;
+        if (!analyser) return;
+
+        const data = new Uint8Array(analyser.frequencyBinCount);
+
+        function tick() {
+            if (!analyserRef.current) return;
+            analyserRef.current.getByteFrequencyData(data);
+            // Collapse the frequency bins into a fixed-width bar chart, like a live waveform.
+            const bars = 24;
+            const chunk = Math.max(1, Math.floor(data.length / bars));
+            const next: number[] = [];
+            for (let i = 0; i < bars; i++) {
+                let sum = 0;
+                for (let j = i * chunk; j < i * chunk + chunk && j < data.length; j++) sum += data[j];
+                const avg = sum / chunk / 255; // normalize to 0-1
+                next.push(Math.min(1, 0.08 + avg * 1.4)); // floor so idle bars stay visible
+            }
+            setAudioLevels(next);
+            animationFrameRef.current = requestAnimationFrame(tick);
+        }
+        animationFrameRef.current = requestAnimationFrame(tick);
+    }
 
     async function startRecording() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const recorder = new MediaRecorder(stream);
         audioChunksRef.current = [];
+
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 128;
+        source.connect(analyser);
+        audioContextRef.current = audioContext;
+        analyserRef.current = analyser;
+        watchAudioLevel();
+
+        setRecordingSeconds(0);
+        timerRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
 
         recorder.ondataavailable = (e) => {
             if (e.data.size > 0) audioChunksRef.current.push(e.data);
@@ -51,6 +94,22 @@ function ConsultationForm() {
     function stopRecording() {
         mediaRecorderRef.current?.stop();
         setIsRecording(false);
+
+        if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+        analyserRef.current = null;
+        audioContextRef.current?.close();
+        audioContextRef.current = null;
+        setAudioLevels(new Array(24).fill(0.08));
+
+        if (timerRef.current) clearInterval(timerRef.current);
+        timerRef.current = null;
+    }
+
+    function formatDuration(totalSeconds: number) {
+        const m = Math.floor(totalSeconds / 60);
+        const s = totalSeconds % 60;
+        return `${m}:${s.toString().padStart(2, '0')}`;
     }
 
     async function transcribeAudio(audioBlob: Blob) {
@@ -216,6 +275,28 @@ function ConsultationForm() {
                             {isRecording ? '⏹ Stop Recording' : transcribing ? 'Transcribing…' : '🎙 Record Visit'}
                         </button>
                     </div>
+
+                    {isRecording && (
+                        <div className="flex items-center gap-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-4 py-3">
+                            <span className="relative flex h-2.5 w-2.5 shrink-0">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
+                            </span>
+                            <div className="flex items-end gap-0.5 h-6 flex-1">
+                                {audioLevels.map((level, i) => (
+                                    <span
+                                        key={i}
+                                        className="flex-1 min-w-0.5 rounded-full bg-red-500 dark:bg-red-400 transition-[height] duration-75"
+                                        style={{ height: `${Math.round(level * 100)}%` }}
+                                    />
+                                ))}
+                            </div>
+                            <span className="text-sm font-mono text-red-700 dark:text-red-300 tabular-nums shrink-0">
+                                {formatDuration(recordingSeconds)}
+                            </span>
+                        </div>
+                    )}
+
                     <textarea
                         id="notes"
                         required
