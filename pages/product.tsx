@@ -25,6 +25,7 @@ function ConsultationForm() {
     // Voice recording state
     const [isRecording, setIsRecording] = useState(false);
     const [transcribing, setTranscribing] = useState(false);
+    const [transcribeError, setTranscribeError] = useState('');
     const [recordingSeconds, setRecordingSeconds] = useState(0);
     const [audioLevels, setAudioLevels] = useState<number[]>(new Array(24).fill(0.08));
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -114,6 +115,7 @@ function ConsultationForm() {
 
     async function transcribeAudio(audioBlob: Blob) {
         setTranscribing(true);
+        setTranscribeError('');
         try {
             const jwt = await getToken();
             const formData = new FormData();
@@ -125,12 +127,28 @@ function ConsultationForm() {
                 body: formData,
             });
 
-            if (!res.ok) throw new Error(`Transcription failed: ${res.status}`);
+            // Read as text first so a non-JSON or truncated body shows up
+            // clearly instead of failing silently inside res.json().
+            const raw = await res.text();
+            console.log('[transcribe] status:', res.status, 'raw:', raw);
 
-            const { text } = await res.json();
-            setNotes((prev) => (prev ? `${prev}\n${text}` : text));
+            if (!res.ok) throw new Error(`Transcription failed (${res.status}): ${raw.slice(0, 200)}`);
+
+            let parsed: { text?: string };
+            try {
+                parsed = JSON.parse(raw);
+            } catch {
+                throw new Error(`Response wasn't valid JSON: ${raw.slice(0, 200)}`);
+            }
+
+            if (!parsed.text) {
+                throw new Error(`Response had no "text" field: ${raw.slice(0, 200)}`);
+            }
+
+            setNotes((prev) => (prev ? `${prev}\n${parsed.text}` : parsed.text!));
         } catch (err) {
             console.error('Transcription error:', err);
+            setTranscribeError(err instanceof Error ? err.message : String(err));
         } finally {
             setTranscribing(false);
         }
@@ -294,6 +312,12 @@ function ConsultationForm() {
                             <span className="text-sm font-mono text-red-700 dark:text-red-300 tabular-nums shrink-0">
                                 {formatDuration(recordingSeconds)}
                             </span>
+                        </div>
+                    )}
+
+                    {transcribeError && (
+                        <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-4 py-2 break-words">
+                            Transcription error: {transcribeError}
                         </div>
                     )}
 
