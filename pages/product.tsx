@@ -22,14 +22,27 @@ function ConsultationForm() {
     const [output, setOutput] = useState('');
     const [loading, setLoading] = useState(false);
 
-    // Voice recording state
+    // Voice recording state — recording is cut into short chunks (CHUNK_MS)
+    // that are transcribed in the background as they complete, so text shows
+    // up a few seconds behind speech instead of only after clicking Stop.
+    const CHUNK_MS = 4000;
+
     const [isRecording, setIsRecording] = useState(false);
     const [transcribing, setTranscribing] = useState(false);
     const [transcribeError, setTranscribeError] = useState('');
     const [recordingSeconds, setRecordingSeconds] = useState(0);
     const [audioLevels, setAudioLevels] = useState<number[]>(new Array(24).fill(0.08));
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef = useRef<Blob[]>([]);
+    const streamRef = useRef<MediaStream | null>(null);
+    const recordingActiveRef = useRef(false);
+    const chunkTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Chunks transcribe out of order under variable (e.g. Lambda cold-start)
+    // latency, so results are keyed by sequence and flushed into `notes`
+    // only in order, to keep the transcript from appearing jumbled.
+    const chunkSeqRef = useRef(0);
+    const chunkTextsRef = useRef<Record<number, string>>({});
+    const nextFlushSeqRef = useRef(0);
+    const pendingTranscriptionsRef = useRef(0);
     const audioContextRef = useRef<AudioContext | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
     const animationFrameRef = useRef<number | null>(null);
@@ -60,10 +73,111 @@ function ConsultationForm() {
         animationFrameRef.current = requestAnimationFrame(tick);
     }
 
+    function formatDuration(totalSeconds: number) {
+        const m = Math.floor(totalSeconds / 60);
+        const s = totalSeconds % 60;
+        return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    // Appends any chunk texts that have arrived, in order, stopping at the
+    // first still-pending sequence number so the transcript never reorders.
+    function flushOrderedChunks() {
+        let appended = '';
+        while (chunkTextsRef.current[nextFlushSeqRef.current] !== undefined) {
+            const text = chunkTextsRef.current[nextFlushSeqRef.current];
+            if (text) appended += (appended ? ' ' : '') + text;
+            delete chunkTextsRef.current[nextFlushSeqRef.current];
+            nextFlushSeqRef.current += 1;
+        }
+        if (appended) {
+            setNotes((prev) => (prev ? `${prev} ${appended}` : appended));
+        }
+    }
+
+    async function transcribeChunk(audioBlob: Blob, seq: number) {
+        pendingTranscriptionsRef.current += 1;
+        setTranscribing(true);
+        try {
+            const jwt = await getToken();
+            const formData = new FormData();
+            formData.append('audio', audioBlob, `chunk-${seq}.webm`);
+
+            const res = await fetch('/api/transcribe', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${jwt}` },
+                body: formData,
+            });
+
+            // Read as text first so a non-JSON or truncated body shows up
+            // clearly instead of failing silently inside res.json().
+            const raw = await res.text();
+            if (!res.ok) throw new Error(`Transcription failed (${res.status}): ${raw.slice(0, 200)}`);
+
+            let parsed: { text?: string };
+            try {
+                parsed = JSON.parse(raw);
+            } catch {
+                throw new Error(`Response wasn't valid JSON: ${raw.slice(0, 200)}`);
+            }
+
+            chunkTextsRef.current[seq] = (parsed.text ?? '').trim();
+        } catch (err) {
+            console.error('Transcription error:', err);
+            setTranscribeError(err instanceof Error ? err.message : String(err));
+            // Still record an (empty) result for this slot so ordering isn't
+            // stuck waiting forever on a chunk that failed.
+            chunkTextsRef.current[seq] = '';
+        } finally {
+            flushOrderedChunks();
+            pendingTranscriptionsRef.current -= 1;
+            setTranscribing(pendingTranscriptionsRef.current > 0);
+        }
+    }
+
+    // Records one CHUNK_MS clip, kicks off its transcription in the
+    // background, then immediately starts the next clip — giving a
+    // near-live transcript instead of one transcription at the end.
+    function runRecordingCycle(stream: MediaStream) {
+        if (!recordingActiveRef.current) {
+            stream.getTracks().forEach((track) => track.stop());
+            return;
+        }
+
+        const recorder = new MediaRecorder(stream);
+        const chunks: Blob[] = [];
+        const seq = chunkSeqRef.current++;
+
+        recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunks.push(e.data);
+        };
+
+        recorder.onstop = () => {
+            const audioBlob = new Blob(chunks, { type: recorder.mimeType });
+            if (audioBlob.size > 0) {
+                transcribeChunk(audioBlob, seq);
+            } else {
+                chunkTextsRef.current[seq] = '';
+                flushOrderedChunks();
+            }
+            runRecordingCycle(stream);
+        };
+
+        mediaRecorderRef.current = recorder;
+        recorder.start();
+
+        chunkTimeoutRef.current = setTimeout(() => {
+            if (recorder.state !== 'inactive') recorder.stop();
+        }, CHUNK_MS);
+    }
+
     async function startRecording() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const recorder = new MediaRecorder(stream);
-        audioChunksRef.current = [];
+        streamRef.current = stream;
+        recordingActiveRef.current = true;
+        chunkSeqRef.current = 0;
+        chunkTextsRef.current = {};
+        nextFlushSeqRef.current = 0;
+        setTranscribeError('');
 
         const audioContext = new AudioContext();
         const source = audioContext.createMediaStreamSource(stream);
@@ -77,24 +191,25 @@ function ConsultationForm() {
         setRecordingSeconds(0);
         timerRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
 
-        recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) audioChunksRef.current.push(e.data);
-        };
-
-        recorder.onstop = async () => {
-            stream.getTracks().forEach((track) => track.stop());
-            const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
-            await transcribeAudio(audioBlob);
-        };
-
-        mediaRecorderRef.current = recorder;
-        recorder.start();
         setIsRecording(true);
+        runRecordingCycle(stream);
     }
 
     function stopRecording() {
-        mediaRecorderRef.current?.stop();
+        recordingActiveRef.current = false;
         setIsRecording(false);
+
+        if (chunkTimeoutRef.current) clearTimeout(chunkTimeoutRef.current);
+        chunkTimeoutRef.current = null;
+
+        // Stop the in-flight chunk now rather than waiting for its timeout —
+        // its onstop handler sees recordingActiveRef is false and stops the
+        // stream's tracks itself once this final chunk is queued.
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            mediaRecorderRef.current.stop();
+        } else {
+            streamRef.current?.getTracks().forEach((track) => track.stop());
+        }
 
         if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
@@ -105,53 +220,6 @@ function ConsultationForm() {
 
         if (timerRef.current) clearInterval(timerRef.current);
         timerRef.current = null;
-    }
-
-    function formatDuration(totalSeconds: number) {
-        const m = Math.floor(totalSeconds / 60);
-        const s = totalSeconds % 60;
-        return `${m}:${s.toString().padStart(2, '0')}`;
-    }
-
-    async function transcribeAudio(audioBlob: Blob) {
-        setTranscribing(true);
-        setTranscribeError('');
-        try {
-            const jwt = await getToken();
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');
-
-            const res = await fetch('/api/transcribe', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${jwt}` },
-                body: formData,
-            });
-
-            // Read as text first so a non-JSON or truncated body shows up
-            // clearly instead of failing silently inside res.json().
-            const raw = await res.text();
-            console.log('[transcribe] status:', res.status, 'raw:', raw);
-
-            if (!res.ok) throw new Error(`Transcription failed (${res.status}): ${raw.slice(0, 200)}`);
-
-            let parsed: { text?: string };
-            try {
-                parsed = JSON.parse(raw);
-            } catch {
-                throw new Error(`Response wasn't valid JSON: ${raw.slice(0, 200)}`);
-            }
-
-            if (!parsed.text) {
-                throw new Error(`Response had no "text" field: ${raw.slice(0, 200)}`);
-            }
-
-            setNotes((prev) => (prev ? `${prev}\n${parsed.text}` : parsed.text!));
-        } catch (err) {
-            console.error('Transcription error:', err);
-            setTranscribeError(err instanceof Error ? err.message : String(err));
-        } finally {
-            setTranscribing(false);
-        }
     }
 
     async function runConsultation(jwt: string, signal: AbortSignal): Promise<'ok' | 'auth-failed'> {
@@ -283,14 +351,14 @@ function ConsultationForm() {
                         <button
                             type="button"
                             onClick={isRecording ? stopRecording : startRecording}
-                            disabled={transcribing}
+                            disabled={!isRecording && transcribing}
                             className={`text-sm font-medium py-1.5 px-4 rounded-lg transition-colors ${
                                 isRecording
                                     ? 'bg-red-600 hover:bg-red-700 text-white'
                                     : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200'
                             } disabled:opacity-50`}
                         >
-                            {isRecording ? '⏹ Stop Recording' : transcribing ? 'Transcribing…' : '🎙 Record Visit'}
+                            {isRecording ? '⏹ Stop Recording' : !isRecording && transcribing ? 'Finishing up…' : '🎙 Record Visit'}
                         </button>
                     </div>
 
@@ -309,6 +377,11 @@ function ConsultationForm() {
                                     />
                                 ))}
                             </div>
+                            {transcribing && (
+                                <span className="text-xs text-red-500 dark:text-red-400 shrink-0 animate-pulse">
+                                    transcribing…
+                                </span>
+                            )}
                             <span className="text-sm font-mono text-red-700 dark:text-red-300 tabular-nums shrink-0">
                                 {formatDuration(recordingSeconds)}
                             </span>
