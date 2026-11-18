@@ -77,47 +77,88 @@ function ConsultationForm() {
         }
     }
 
+    async function runConsultation(jwt: string, signal: AbortSignal): Promise<'ok' | 'auth-failed'> {
+        let buffer = '';
+        let authFailed = false;
+
+        try {
+            await fetchEventSource('/api/consultation', {
+                signal,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${jwt}`,
+                },
+                body: JSON.stringify({
+                    patient_name: patientName,
+                    date_of_visit: visitDate?.toISOString().slice(0, 10),
+                    notes,
+                    practice_email: practiceEmail || null,
+                }),
+                async onopen(response) {
+                    if (response.ok && response.headers.get('content-type')?.includes('text/event-stream')) {
+                        return;
+                    }
+                    if (response.status === 403) {
+                        authFailed = true;
+                    }
+                    throw new Error(`Unexpected response: ${response.status}`);
+                },
+                onmessage(ev) {
+                    buffer += ev.data;
+                    setOutput(buffer);
+                },
+                onerror(err) {
+                    console.error('SSE error:', err);
+                    // Re-throw so fetchEventSource stops retrying instead of
+                    // resending the same (now possibly stale) JWT in a loop —
+                    // we handle the one retry we want ourselves, with a fresh token.
+                    throw err;
+                },
+            });
+        } catch (err) {
+            if (!authFailed) {
+                console.error('Consultation request failed:', err);
+                setOutput('Something went wrong generating the summary. Please try again.');
+            }
+        }
+
+        return authFailed ? 'auth-failed' : 'ok';
+    }
+
     async function handleSubmit(e: FormEvent) {
         e.preventDefault();
         setOutput('');
         setLoading(true);
 
-        const jwt = await getToken();
+        const controller = new AbortController();
+
+        let jwt = await getToken();
         if (!jwt) {
             setOutput('Authentication required');
             setLoading(false);
             return;
         }
 
-        const controller = new AbortController();
-        let buffer = '';
+        let result = await runConsultation(jwt, controller.signal);
 
-        await fetchEventSource('/api', {
-            signal: controller.signal,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${jwt}`,
-            },
-            body: JSON.stringify({
-                patient_name: patientName,
-                date_of_visit: visitDate?.toISOString().slice(0, 10),
-                notes,
-                practice_email: practiceEmail || null,
-            }),
-            onmessage(ev) {
-                buffer += ev.data;
-                setOutput(buffer);
-            },
-            onclose() { 
-                setLoading(false); 
-            },
-            onerror(err) {
-                console.error('SSE error:', err);
-                controller.abort();
-                setLoading(false);
-            },
-        });
+        // A Lambda cold start can take longer than the Clerk session token's
+        // short lifespan, so the token can expire between being fetched and
+        // reaching the server. On an auth failure, grab a brand-new token
+        // and retry exactly once (not an unbounded loop).
+        if (result === 'auth-failed') {
+            jwt = await getToken({ skipCache: true });
+            if (jwt) {
+                setOutput('');
+                result = await runConsultation(jwt, controller.signal);
+            }
+        }
+
+        if (result === 'auth-failed') {
+            setOutput('Authentication expired. Please try again.');
+        }
+
+        setLoading(false);
     }
 
     return (

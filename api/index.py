@@ -53,7 +53,7 @@ def send_summary_email(visit: Visit, summary: str) -> None:
         print(f"Failed to send summary email: {e}")
 
 
-@app.post("/api")
+@app.post("/api/consultation")
 def consultation_summary(
     visit: Visit,
     creds: HTTPAuthorizationCredentials = Depends(clerk_guard),
