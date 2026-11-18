@@ -50,10 +50,15 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
+          # --output none / --query suppress the function's full config in the
+          # response (which includes its runtime Environment.Variables in
+          # plaintext) from ever reaching the log, since this repo is public.
           aws lambda update-function-code \
             --function-name "$LAMBDA_FUNCTION_NAME" \
             --image-uri "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
-            --region "$AWS_REGION"
+            --region "$AWS_REGION" \
+            --query 'LastUpdateStatus' \
+            --output text
 
           aws lambda wait function-updated \
             --function-name "$LAMBDA_FUNCTION_NAME" \
