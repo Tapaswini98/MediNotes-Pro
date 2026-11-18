@@ -352,45 +352,59 @@ function ConsultationForm() {
                             type="button"
                             onClick={isRecording ? stopRecording : startRecording}
                             disabled={!isRecording && transcribing}
-                            className={`text-sm font-medium py-1.5 px-4 rounded-lg transition-colors ${
+                            className={`flex items-center gap-1.5 text-sm font-medium py-1.5 px-4 rounded-full transition-all shadow-sm ${
                                 isRecording
-                                    ? 'bg-red-600 hover:bg-red-700 text-white'
-                                    : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200'
-                            } disabled:opacity-50`}
+                                    ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-200 dark:shadow-none'
+                                    : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white'
+                            } disabled:opacity-50 disabled:cursor-not-allowed`}
                         >
-                            {isRecording ? '⏹ Stop Recording' : !isRecording && transcribing ? 'Finishing up…' : '🎙 Record Visit'}
+                            {isRecording ? (
+                                <>
+                                    <span className="h-2 w-2 rounded-sm bg-white" />
+                                    Stop Recording
+                                </>
+                            ) : !isRecording && transcribing ? (
+                                'Finishing up…'
+                            ) : (
+                                <>🎙 Record Visit</>
+                            )}
                         </button>
                     </div>
 
                     {isRecording && (
-                        <div className="flex items-center gap-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-4 py-3">
+                        <div className="flex items-center gap-4 bg-gradient-to-r from-slate-50 to-blue-50 dark:from-gray-900 dark:to-indigo-950/40 border border-blue-100 dark:border-indigo-900/60 rounded-xl px-5 py-3.5 shadow-sm">
                             <span className="relative flex h-2.5 w-2.5 shrink-0">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-60" />
                                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
                             </span>
-                            <div className="flex items-end gap-0.5 h-6 flex-1">
+
+                            <div className="flex items-center gap-[3px] h-8 flex-1">
                                 {audioLevels.map((level, i) => (
                                     <span
                                         key={i}
-                                        className="flex-1 min-w-0.5 rounded-full bg-red-500 dark:bg-red-400 transition-[height] duration-75"
-                                        style={{ height: `${Math.round(level * 100)}%` }}
+                                        className="flex-1 min-w-[2px] rounded-full bg-gradient-to-t from-blue-600 to-indigo-400 dark:from-blue-400 dark:to-indigo-300 transition-[height] duration-75"
+                                        style={{ height: `${Math.max(12, Math.round(level * 100))}%` }}
                                     />
                                 ))}
                             </div>
+
                             {transcribing && (
-                                <span className="text-xs text-red-500 dark:text-red-400 shrink-0 animate-pulse">
-                                    transcribing…
+                                <span className="flex items-center gap-1.5 text-xs font-medium text-indigo-600 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/50 px-2.5 py-1 rounded-full shrink-0">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                                    Transcribing
                                 </span>
                             )}
-                            <span className="text-sm font-mono text-red-700 dark:text-red-300 tabular-nums shrink-0">
+
+                            <span className="text-sm font-mono font-medium text-gray-600 dark:text-gray-300 tabular-nums shrink-0">
                                 {formatDuration(recordingSeconds)}
                             </span>
                         </div>
                     )}
 
                     {transcribeError && (
-                        <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-4 py-2 break-words">
-                            Transcription error: {transcribeError}
+                        <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 rounded-xl px-4 py-2.5 break-words">
+                            <span className="shrink-0">⚠️</span>
+                            <span>{transcribeError}</span>
                         </div>
                     )}
 
