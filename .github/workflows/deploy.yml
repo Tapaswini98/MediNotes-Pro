@@ -12,6 +12,11 @@ env:
 
 jobs:
   deploy:
+    # Pipeline paused: repo is public and we're done actively deploying for
+    # now. Flip this back to `true` (or remove the line) to resume. This
+    # keeps the workflow intact and re-enableable without touching AWS or
+    # re-entering secrets.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
